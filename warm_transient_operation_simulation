@@ -1,0 +1,337 @@
+clear all; close all; clc
+load('some data');
+load('some data2');
+model = 'System_Dynamic_DP';
+
+%% PROBLEM & OPTIONS STRUCTURE:
+options = dpm();
+options.SaveMap     = 1;            % Save cost-to-go map
+options.Waitbar     = 1;            % Hide the waitbar while DP runing? 0 or 1
+options.Warnings    = 1;            % Show warnings? 0 or 1
+OPTIONS.Verbose     = 'on';         % on/off command window status notification
+options.InputType   = 'c';
+% scenario-specific setting ----------------------------------------------------
+cold_start               = 0;            % cold start of engine
+zero_state_start         = 0;            % states started in zero
+start_state_specific     = 1;            % specific starting states
+estimating_temperature   = 0;            % if to estimate SCR temperature
+% -------------------------------------------------------------------------
+options.MyInf       = 1e15;
+% options.BoundaryMethod = 'Line';
+% if strcmp(options.BoundaryMethod,'Line')
+%     options.Iter = 5;
+%     options.Tol = 1e-8;
+%     options.FixedGrid = 0;
+% end
+
+%% operating scenario
+k = 3:100:length(meas.DynoTrqOut.tt);
+T_tot = max(min(meas.DynoTrqOut.yy(k),800),0);
+n_tot = max(min(meas.nEng_ECU.yy(k),2100),700);
+prb.Ts = 1; % [s]
+t_vec = 0:prb.Ts:length(meas.TC_10_0.tt(k))-1;
+prb.N  = length(meas.TC_10_0.tt(k))-1; % steps
+E_eng_tot = sum(n_tot .* pi/ 30 .* T_tot /3600 / 1000); % total mechanical energy, [kWh]
+
+% weightings in cost functionpar.
+par.weight_alpha = 0.16; % NOx
+par.weight_beta = 0.02;  % NH3
+% approximate SOC
+% SOC_app = -6;
+
+% disturbance
+prb.W{1} = n_tot;
+prb.W{2} = T_tot;
+% exhaust_pipe_in_SOI_0 = zeros(1,length(T_tot));
+T_exhaust_pipe_in_SOI_0 = zeros(1,length(T_tot));
+m_EG_kgps_SOI_0 = zeros(1,length(T_tot));
+for i = 1:length(T_tot)
+    
+    %     exhaust_pipe_in_SOI_0(i) = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+    %         par.EngLookUp.T_ExPipeIn_lookup, n_tot(i), 0, T_tot(i));
+    
+    u1_ss_optimal = interp2(par.Steady_State_Optimal_LookUp.N_mesh_2d,...
+        par.Steady_State_Optimal_LookUp.Torque_mesh_2d, ...
+        par.Steady_State_Optimal_LookUp.Soc_NH3_controlled_lookup, ...
+        n_tot(i), T_tot(i));
+    T_exhaust_pipe_in_SOI_0(i) = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+        par.EngLookUp.T_ExPipeIn_lookup, n_tot(i), u1_ss_optimal, T_tot(i));
+
+% similar for m_EG_kgps_SOI_0
+end
+p_i = 1e5;
+rho_i = p_i ./ 287 ./ T_exhaust_pipe_in_SOI_0;
+VFlow = m_EG_kgps_SOI_0 ./ rho_i; % [m3/s]
+h_cvi = parameter_dyn(4) * VFlow .^ parameter_dyn(5);
+e_term = exp(- h_cvi * parameter_dyn(3) ./ (m_EG_kgps_SOI_0 * par.gas.cp_eg.value));
+T_a = par.const.T_amb.value;
+
+% initial thermal state of exhaust pipe
+if cold_start == 1 % cold start of exhaust pipe and SCR
+    % Exhaust pipe temperature
+    T_w_start = 300; % [K]
+    [~,T_w] = ode23(@(t,z) T_wall_dyn(t, z, T_exhaust_pipe_in_SOI_0, ...
+        VFlow, m_EG_kgps_SOI_0, T_a, t_vec, parameter_dyn, par), t_vec, T_w_start);
+    T_exhaust_pipe_out = T_w' + (T_exhaust_pipe_in_SOI_0 - T_w') .* e_term;
+    % SCR temperature
+    T_SCR_start = [300;300];
+    [~, T_SCR] = ode23(@(t,z) SCR_Temp_2_cells(t, z, par, m_EG_kgps_SOI_0, T_exhaust_pipe_out, t_vec),t_vec, T_SCR_start);
+    prb.W{3} = T_SCR(:,1)'; % temperature cell 1
+    prb.W{4} = T_SCR(:,2)'; % temperature cell 2
+else % warm start of exhaust pipe and SCR
+%     h_cve = parameter_dyn(2);
+%     h_gi_start = (1 - e_term(1)) / (-log(e_term(1))) * h_cvi(1);
+    % Exhaust pipe temperature
+%     T_w_start = (h_gi_start * T_exhaust_pipe_in_SOI_0(1) + h_cve * T_a) / (h_cve + h_gi_start);
+    T_w_start = 540; % initial wall temperature [K];
+    % T_exhaust_pipe_in_SOI_0(1) - h_tot_start / h_gi_start * (T_exhaust_pipe_in_SOI_0(1) - T_a);
+    [~,T_w] = ode23(@(t,z) T_wall_dyn(t, z, T_exhaust_pipe_in_SOI_0, ...
+        VFlow, m_EG_kgps_SOI_0, T_a, t_vec, parameter_dyn, par), t_vec, T_w_start);
+    T_exhaust_pipe_out = T_w' + (T_exhaust_pipe_in_SOI_0 - T_w') .* e_term;
+    % SCR temperature
+    T_SCR_start = [T_exhaust_pipe_out(1);T_exhaust_pipe_out(1)];
+    [~, T_SCR] = ode23(@(t,z) SCR_Temp_2_cells(t, z, par, m_EG_kgps_SOI_0, T_exhaust_pipe_out, t_vec),t_vec, T_SCR_start);
+    prb.W{3} = T_SCR(:,1)'; % temperature cell 1 [K]
+    prb.W{4} = T_SCR(:,2)'; % temperature cell 2 [K]
+end
+
+if estimating_temperature == 0 % if using the temperature from previous DP calculation
+    T_SCR_optimal_controlled_prev = load('some path','T_SCR_optimal_controlled');
+    T_SCR_prev = load('some data','T_SCR');
+    T_SCR(:,1) = [T_SCR_prev.T_SCR(1,1);T_SCR_optimal_controlled_prev.T_SCR_optimal_controlled(:,1)]; % [K]
+    T_SCR(:,2) = [T_SCR_prev.T_SCR(1,2);T_SCR_optimal_controlled_prev.T_SCR_optimal_controlled(:,2)]; % [K]
+    prb.W{3} = T_SCR(:,1)';
+    prb.W{4} = T_SCR(:,2)';
+end
+
+% T_w_1 = (T_o(1) - T_exhaust_pipe_in_SOI_0(1) * e_term(1)) / (1 - e_term(1));
+% par.const.T_amb.value; % ambient temperature
+
+
+
+%% PREPARE DP:
+% X1: cell 1 coverage
+% X2: cevll 2 coerage
+% U1: SOC
+% U2: adb mass flow
+state_discrete = 0.01; % discrete state
+state_info = [interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+    par.EngLookUp.Theta1_lookup,n_tot(1),0,T_tot(1));
+    interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh,...
+    par.EngLookUp.Theta2_lookup,n_tot(1),10,T_tot(1))];
+if (isnan(state_info) | cold_start == 1 | zero_state_start ==1) & start_state_specific == 0
+    grd.X0{1} = 0; % coverage cell 1
+    grd.X0{2} = 0; % coverage cell 2
+elseif start_state_specific == 1
+    grd.X0{1} = 0.05323;
+    grd.X0{2} = 0.04171;
+else
+    state_info = round(state_info/state_discrete)*state_discrete;
+    grd.X0{1} = state_info(1);
+    grd.X0{2} = state_info(2);
+end
+% state
+grd.Xn{1}.lo = 0; % lower bound of X1
+grd.Xn{1}.hi = 0.5; % higher bound of X1
+grd.XN{1}.lo = 0; % lower bound of X1 at final state
+grd.XN{1}.hi = 0.5; % higher bound of X1 at final state
+Nx1 = (grd.Xn{1}.hi - grd.Xn{1}.lo)/ state_discrete + 1; % state number
+grd.Nx{1} = Nx1;
+
+% similar for the second cell 2
+
+% similar setting for control inputs
+
+%% DYNAMIC PROGRAMMING
+
+% options.gN{1} = zeros(grd.Nx{1},grd.Nx{2});
+[out, dyn] = dpm(@System_Dynamic_DP,par,grd,prb,options);
+
+% 
+... system outputs NH_3 slip and NO3 at SCR outlet
+%
+
+% real SCR temperature
+SOI_optimal = out.u1;
+T_exhaust_pipe_in_SOI_optimal = zeros(1,length(SOI_optimal));
+m_EG_kgps_SOI_optimal = zeros(1,length(SOI_optimal));
+for i = 1:length(SOI_optimal)
+    T_exhaust_pipe_in_SOI_optimal(i) = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+        par.EngLookUp.T_ExPipeIn_lookup, n_tot(i), SOI_optimal(i), T_tot(i)); % temperature at optimal SOI, given n and T
+    m_EG_kgps_SOI_optimal(i) = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+        par.EngLookUp.MFlowExhaust_kgps_lookup, n_tot(i), SOI_optimal(i), T_tot(i)); % exhaust gas mass flow at optimal SOI, given n and T
+end
+rho_i = p_i ./ 287 ./ T_exhaust_pipe_in_SOI_optimal;
+VFlow_optimal = m_EG_kgps_SOI_optimal ./ rho_i; % [m3/s]
+h_cvi_optimal = parameter_dyn(4) * VFlow_optimal .^ parameter_dyn(5);
+e_term_optimal = exp(- h_cvi_optimal * parameter_dyn(3) ./ (m_EG_kgps_SOI_optimal * par.gas.cp_eg.value));
+[~,T_w_optimal_controlled] = ode23(@(t,z) T_wall_dyn(t, z, T_exhaust_pipe_in_SOI_optimal, ...
+    VFlow_optimal, m_EG_kgps_SOI_optimal, T_a, t_vec(1:end-1), parameter_dyn, par), t_vec(1:end-1), T_w_start);
+T_exhaust_pipe_out_optimal_controlled = T_w_optimal_controlled' + (T_exhaust_pipe_in_SOI_optimal - T_w_optimal_controlled') .* e_term_optimal;
+if cold_start ==1
+    T_SCR_start = [300;300];
+else
+    T_SCR_start = [T_exhaust_pipe_out(1);T_exhaust_pipe_out(1)];
+end
+[~, T_SCR_optimal_controlled] = ode23(@(t,z) SCR_Temp_2_cells(t, z, par, m_EG_kgps_SOI_optimal, ...
+    T_exhaust_pipe_out_optimal_controlled, t_vec(1:end-1)),t_vec(1:end-1), T_SCR_start);
+% operating cost
+cost_fuel_Adb = out.cost_fuel_CHF_step + out.cost_Adb_CHF_step; % [CHF] in time step
+cost_fuel_Adb_cum = cumsum(out.cost_fuel_CHF_step + out.cost_Adb_CHF_step); % CHF
+
+%% PLOT RESULT for engine duty cycle, optimal states trajectories, optimal inputs, operating costs, constraints
+
+%% extra calculation 2 (steady-state optimal control for input 1)
+T_SCR_optimal_controlled_average = (T_SCR_optimal_controlled(:,1) + T_SCR_optimal_controlled(:,2))/2-273.15;
+t_200_T = find(T_SCR_optimal_controlled_average > 200,1); % when the SCR temperature reaches 200 celsius degree
+dyn_test = dyn;
+% interpolate the optimal control inputs from the steady-state results
+for i = 1 : length(out.u1) % the first control input
+    u1_ss_optimal = interp2(par.Steady_State_Optimal_LookUp.N_mesh_2d,...
+        par.Steady_State_Optimal_LookUp.Torque_mesh_2d, ...
+        par.Steady_State_Optimal_LookUp.Soc_NH3_controlled_lookup, ...
+        n_tot(i), T_tot(i));
+    dyn_test.Uo{1,i} = ones(Nx1, Nx2) * u1_ss_optimal;
+end
+%
+... similar for the second optimal control input
+
+par.dp.forward = 1;
+out_2 = dpm(dyn_test, @System_Dynamic_DP, par, grd, prb, options);
+
+% NH_3 slip
+ppm_NH3_transient_2 = mean(out_2.ppm_NH3_out);
+% NO3 at SCR inlet
+M_NOx_in_cum_g_2 = cumsum(out_2.MFlow_NOx_in).*prb.Ts*1e3;
+M_NOx_in_cum_gpkwh_2 = M_NOx_in_cum_g_2./E_eng_tot;
+M_NOx_in_cum_gpkwh_tot_2 = M_NOx_in_cum_gpkwh_2(end);
+% NO3 at SCR outlet
+M_NOx_out_cum_g_2 = cumsum(out_2.MFlow_NOx_out).*prb.Ts*1e3;
+M_NOx_out_cum_gpkwh_2 = M_NOx_out_cum_g_2./E_eng_tot;
+M_NOx_out_cum_gpkwh_tot_2 = M_NOx_out_cum_gpkwh_2(end);
+M_NOx_out_cum_g_tot_lim_2 = par.EmitLimit.value * E_eng_tot;
+% real SCR temperature
+SOI_optimal_2 = out_2.u1;
+T_exhaust_pipe_in_SOI_optimal_2 = zeros(1,length(SOI_optimal_2));
+m_EG_kgps_SOI_optimal_2 = zeros(1,length(SOI_optimal_2));
+for i = 1:length(SOI_optimal_2)
+    T_exhaust_pipe_in_SOI_optimal_2(i) = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+        par.EngLookUp.T_ExPipeIn_lookup, n_tot(i), SOI_optimal_2(i), T_tot(i)); % temperature at optimal SOI, given n and T
+    m_EG_kgps_SOI_optimal_2(i) = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+        par.EngLookUp.MFlowExhaust_kgps_lookup, n_tot(i), SOI_optimal_2(i), T_tot(i)); % exhaust gas mass flow at optimal SOI, given n and T
+end
+rho_i_2 = p_i ./ 287 ./ T_exhaust_pipe_in_SOI_optimal_2;
+VFlow_optimal_2 = m_EG_kgps_SOI_optimal_2 ./ rho_i_2; % [m3/s]
+h_cvi_optimal_2 = parameter_dyn(4) * VFlow_optimal_2 .^ parameter_dyn(5);
+e_term_optimal_2 = exp(- h_cvi_optimal_2 * parameter_dyn(3) ./ (m_EG_kgps_SOI_optimal_2 * par.gas.cp_eg.value));
+[~,T_w_optimal_controlled_2] = ode23(@(t,z) T_wall_dyn(t, z, T_exhaust_pipe_in_SOI_optimal_2, ...
+    VFlow_optimal_2, m_EG_kgps_SOI_optimal_2, T_a, t_vec(1:end-1), parameter_dyn, par), t_vec(1:end-1), T_w_start);
+T_exhaust_pipe_out_optimal_controlled_2 = T_w_optimal_controlled_2' + (T_exhaust_pipe_in_SOI_optimal_2 - T_w_optimal_controlled_2') .* e_term_optimal_2;
+if cold_start ==1
+    T_SCR_start_2 = [300;300];
+else
+    T_SCR_start_2 = [T_exhaust_pipe_out(1);T_exhaust_pipe_out(1)];
+end
+[t_sim, T_SCR_optimal_controlled_2] = ode23(@(t,z) SCR_Temp_2_cells(t, z, par, m_EG_kgps_SOI_optimal_2, ...
+    T_exhaust_pipe_out_optimal_controlled_2, t_vec(1:end-1)),t_vec(1:end-1), T_SCR_start_2);
+% operating cost
+cost_fuel_Adb_2 = out_2.cost_fuel_CHF_step + out_2.cost_Adb_CHF_step; % [CHF] in time step
+cost_fuel_Adb_cum_2 = cumsum(out_2.cost_fuel_CHF_step + out_2.cost_Adb_CHF_step); % CHF
+
+%% similar PLOT RESULT 2 
+
+
+%% extra calculation 3 (Engine Steady-state, SCR DP)
+% parameter
+par_3 = load('Parameter.mat');
+par3 = par_3.par;
+par3.weight_alpha = 0.64;
+par3.weight_beta = 0.04;
+
+% 
+... state and control input setting
+%
+
+%
+... disturbances specification
+%
+
+if estimating_temperature == 0 % if using the temperature from previous DP calculation
+    T_SCR_optimal_controlled_prev3 = load('some path','T_SCR_optimal_controlled3');
+    T_SCR3(:,1) = [T_SCR_optimal_controlled_prev3.T_SCR_optimal_controlled3(:,1);...
+        T_SCR_optimal_controlled_prev3.T_SCR_optimal_controlled3(end,1)]; % [K]
+    T_SCR3(:,2) = [T_SCR_optimal_controlled_prev3.T_SCR_optimal_controlled3(:,2);...
+        T_SCR_optimal_controlled_prev3.T_SCR_optimal_controlled3(end,2)]; % [K]
+    prb3.W{3} = T_SCR3(:,1)';
+    prb3.W{4} = T_SCR3(:,2)';
+end
+
+for i = 1 : length(out.u1)
+    u1_ss_optimal = interp2(par.Steady_State_Optimal_LookUp.N_mesh_2d,...
+        par.Steady_State_Optimal_LookUp.Torque_mesh_2d, ...
+        par.Steady_State_Optimal_LookUp.Soc_default_lookup, ...
+        n_tot(i), T_tot(i));
+    prb3.W{5}(i) = u1_ss_optimal;
+end
+
+[out3, dyn3] = dpm(@System_Dynamic_DP_SCR_DP,par3,grd3,prb3,options);
+
+%
+... system output manipulation and results representation 
+%
+
+
+
+%% extra calculation 4 (SS+DP control strategy) 
+% 
+... parameter specification
+%
+
+
+% 
+... state specification
+%
+
+% 
+... first control specification
+%
+
+% 
+... disturbances definition
+%
+
+if estimating_temperature == 0 % if using the temperature from previous DP calculation
+    T_SCR_optimal_controlled_prev4 = load('some data','T_SCR_optimal_controlled4');
+    T_SCR4(:,1) = [T_SCR_optimal_controlled_prev4.T_SCR_optimal_controlled4(:,1);...
+        T_SCR_optimal_controlled_prev4.T_SCR_optimal_controlled4(end,1)]; % [K]
+    T_SCR4(:,2) = [T_SCR_optimal_controlled_prev4.T_SCR_optimal_controlled4(:,2);...
+        T_SCR_optimal_controlled_prev4.T_SCR_optimal_controlled4(end,2)]; % [K]
+    prb4.W{3} = T_SCR4(:,1)';
+    prb4.W{4} = T_SCR4(:,2)';
+end
+% find the first optimal control input
+for i = 1 : length(out.u1)
+    u1_ss_optimal = interp2(par.Steady_State_Optimal_LookUp.N_mesh_2d,...
+        par.Steady_State_Optimal_LookUp.Torque_mesh_2d, ...
+        par.Steady_State_Optimal_LookUp.Soc_optimal_lookup, ...
+        n_tot(i), T_tot(i));
+    if isnan(u1_ss_optimal)
+        u1_ss_optimal = interp2(par.Steady_State_Optimal_LookUp.N_mesh_2d,...
+            par.Steady_State_Optimal_LookUp.Torque_mesh_2d, ...
+            par.Steady_State_Optimal_LookUp.Soc_NH3_controlled_lookup, ...
+            n_tot(i), T_tot(i));
+    end
+    prb4.W{5}(i) = min(u1_ss_optimal,prb3.W{5}(i));
+end
+
+[out4, dyn4] = dpm(@System_Dynamic_DP_SCR_DP,par4,grd4,prb4,options);
+%
+... system output manipulation
+%
+
+% save data
+save(['some path' date '.mat']);
+
+%
+...PLOT RESULT 4
+%
