@@ -1,0 +1,78 @@
+clc, clear all, close all
+%%
+load('some data1');
+load('some data2');
+load('some data3');
+k = 3:100:length(meas.TC_6_1.tt);
+    time_vec = meas.TC_10_0.tt(k);
+    T_a = par.const.T_amb.value; % ambient temperature [K]
+    T_o = meas.TC_10_0.yy(k) + 273.15; % [K]
+    T_i = meas.TC_6_1.yy(k) + 273.15; % [K]
+    T_SCR_out_meas  = meas.TC_10_LG.yy(k) + 273.15; % [K]
+
+    p_i = 1e5; % [Pa]
+    N_eng   = meas.nEng_ECU.yy(k); % rpm
+    %     N_eng_sm = smooth(N_eng,3)';
+    %     dQ_val  = meas.FuInjMCorrn_QntyCorrd.yy(k); % mg/str
+%
+... some data manipulation
+%
+    VFlow = m_EG_kgps ./ rho_i; % [m3/s]
+    
+    % fminsearch-----------------------------------------------------------
+% first guess of the parameters
+    parameter_dyn(1) = ???; % wall dynamic parameter
+    parameter_dyn(2) = ???;  % h_cve static parameter
+    parameter_dyn(3) = ???; % surface static parameter
+    parameter_dyn(4) = ???; % alpha for h_cvi
+    parameter_dyn(5) = ???; % beta for h_cvi    
+    
+    % Fminsearch_Options  = optimset('TolFun',1e-10,'TolX',1e-10);
+%     parameter_dyn  = fminsearch(@(xx) sim_wall_dynamic(T_i, VFlow, m_EG_kgps, T_a, time_vec, xx, par, T_o),parameter_dyn);
+    
+    h_cvi = parameter_dyn(4) * VFlow .^ parameter_dyn(5);
+    e_term = exp(- h_cvi * parameter_dyn(3) ./ (m_EG_kgps * par.gas.cp_eg.value));
+    T_w_1 = (T_o(1) - T_i(1) * e_term(1)) / (1 - e_term(1));
+    [t_sim,T_w_sim] = ode23(@(t,z) T_wall_dyn(t, z, T_i, VFlow, m_EG_kgps, T_a, time_vec, parameter_dyn, par), time_vec, T_w_1);
+    T_o_sim = T_w_sim' + (T_i - T_w_sim') .* e_term;
+    % SCR temperature simulation
+    T_SCR_1 = [T_o(1);T_SCR_out_meas(1)];
+    [t_sim, T_SCR_sim] = ode23(@(t,z) SCR_Temp_2_cells(t, z, par, m_EG_kgps, T_o_sim, time_vec),time_vec, T_SCR_1);
+    [t_sim, T_SCR] = ode23(@(t,z) SCR_Temp_2_cells(t, z, par, m_EG_kgps, T_o, time_vec),time_vec, T_SCR_1);
+    
+    % plot-----------------------------------------------------------------
+% for comparison of the simulated SCR temperature using estimated parameters and using measurement data
+    figure(1);
+    subplot(211); plot(t_sim, T_SCR(:,1)-273.15); hold on; plot(T_SCR_sim(:,1)-273.15);
+    grid on; 
+    legend('simulation using measured exhaust pipe outlet temperature',...
+        'simulation using esitmated exhaust pipe outlet temperature');
+    ylabel('Temperature Cell 1 [K]'); xlim([t_sim(1),t_sim(end)]);
+    ylim([0 400]);
+    title('SCR Temperautre Simulation (Cell 1)');
+    subplot(212); 
+    plot(t_sim, T_SCR(:,2)-273.15); hold on; 
+    plot(T_SCR_sim(:,2)-273.15);
+    plot(T_SCR_out_meas-273.15);
+    title('SCR Temperautre Simulation (Cell 2)');
+    grid on; 
+    legend('simulation using measured exhaust pipe outlet temperature',...
+        'simulation using esitmated exhaust pipe outlet temperature',...
+        'measured SCR outlet temperature');
+    xlabel('Time [s]'); xlim([t_sim(1),t_sim(end)]);
+    ylabel('Temperature Cell 2 [K]'); ylim([0 400]);
+    
+    figure(2); 
+    subplot(211);
+    plot(t_sim,T_i-273.15);hold on;
+    ylim([0 400]); xlim([t_sim(1),t_sim(end)]);
+    ylabel('exhaust pipe inlet temperature [^{\circ}C]');
+    legend('temperature at inlet');
+    title('Thermal Exhaust Pipe Model Validation for Dynamic Parameters');
+    subplot(212);
+    plot(t_sim, T_o-273.15); hold on; 
+    plot(t_sim, T_o_sim-273.15); 
+    ylim([0 400]);
+    xlabel('Time [s]'); xlim([t_sim(1),t_sim(end)]);
+    ylabel('exhaust pipe outlet temperature [^{\circ}C]');
+    legend('temperature at outlet (measured)','temperature at outlet (estimated)');
