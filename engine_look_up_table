@@ -1,0 +1,243 @@
+clear all, clc
+load('some data');
+
+%% 
+% X = X(N,T,SOC);
+% prepare data for look-up table
+Soc_vector = -10:2:10;
+for ii = 1:18
+    % torque lookup, linear regression
+    [~,beta_hat,~] = linear_least_square_fitting(StaticData{ii}.Soc,StaticData{ii}.Torque);
+    x_reg = [ones(length(Soc_vector),1), Soc_vector'];
+    StaticData{ii}.Torque_lookup = (x_reg * beta_hat)';
+
+    %... look up tables for other engine outputs, such as temperature, pressure, exhaust mass
+    
+
+    % brake specific cost, "quadratic fitting"
+    BSCost_cal_opt_SOC_feas = StaticData{ii}.BSCost_cal_opt_SOC(~isinf(StaticData{ii}.BSCost_cal_opt_SOC));
+    Soc_feas = StaticData{ii}.Soc(~isinf(StaticData{ii}.BSCost_cal_opt_SOC));
+    if isempty(BSCost_cal_opt_SOC_feas)
+        StaticData{ii}.BSCost_real_lookup = inf(length(Soc_vector),1)';
+    else
+        [~,beta_hat,~] = quadratic_least_square_fitting(Soc_feas,BSCost_cal_opt_SOC_feas);
+        x_reg = [ones(length(Soc_vector),1), Soc_vector', Soc_vector'.^2];
+        StaticData{ii}.BSCost_real_lookup = (x_reg * beta_hat)';
+        Soc_infeas_min = min(StaticData{ii}.Soc(isinf(StaticData{ii}.BSCost_cal_opt_SOC)));
+        if ~isempty(Soc_infeas_min)
+            index_infeas = Soc_vector>Soc_infeas_min;
+            StaticData{ii}.BSCost_real_lookup(index_infeas) = inf; % cost at infeasible points are set to be infinity
+        end
+
+    end
+    [~,beta_hat,~] = quadratic_least_square_fitting(StaticData{ii}.Soc,StaticData{ii}.MFlowAdb_in_kgph_req_NH3_controlled);
+    x_reg = [ones(length(Soc_vector),1), Soc_vector', Soc_vector'.^2];
+    StaticData{ii}.MFlowAdb_in_kgph_req_lookup = (x_reg * beta_hat)';
+
+    %... look up tables for other values, such as engine out NOx concentration
+
+
+end
+
+%% generate 3d look up table
+N_vector = [700, 1000, 1400, 1800, 2100];
+% N_vector = 700:100:2100;
+% Torque_vector = 100:100:800;
+Torque_vector = 0:10:800;
+N_rounded = round(OP_N/100)*100;
+dQ_rounded = round(OP_dQ/10)*10;
+
+[N_mesh,Soc_mesh,Torque_mesh] = meshgrid(N_vector,Soc_vector,Torque_vector);
+size_mesh = size(N_mesh);
+for index1 = 1:size_mesh(2)    % N vector
+    N_loop = N_mesh(1,index1,1);
+    N_index = find(N_rounded==N_loop);
+    N_index(N_index==7)=[];
+    for index2 = 1:size_mesh(1) % SOC vector
+        Soc_loop = Soc_mesh(index2,1,1);
+        Soc_index = find(Soc_vector==Soc_loop);
+        T_interp = [];
+        dQ_interp = [];
+        T_ExPipeIn_interp = [];
+        NFlowNox_EngOut_molps_interp = [];
+        MFlowExhaust_kgps_interp = [];
+        Theta1_interp = [];
+        Theta2_interp = [];
+        Theta1_NH3_controlled__interp = [];
+        Theta2_NH3_controlled__interp = [];
+        p_ExPipeIn_interp = [];
+        BSCost_real_interp = [];
+        MFlowAdb_in_kgph_req_interp = [];
+        BSCost_real_NH3_controlled_interp = [];
+        ppm_NH3_out_interp = [];
+        for N_index_i = 1 : length(N_index) % Torque vector
+            OP_index = N_index(N_index_i);
+            T_interp = [T_interp,StaticData{OP_index}.Torque_lookup(Soc_index)];
+            dQ_interp = [dQ_interp,dQ_rounded(OP_index)];
+            T_ExPipeIn_interp = [T_ExPipeIn_interp,StaticData{OP_index}.Temperatur_ExPipeIn_K_lookup(Soc_index)];
+            NFlowNox_EngOut_molps_interp = [NFlowNox_EngOut_molps_interp, ...
+                StaticData{OP_index}.NFlowNox_EngOut_molps_lookup(Soc_index)];
+            MFlowExhaust_kgps_interp = [MFlowExhaust_kgps_interp, ...
+                StaticData{OP_index}.MFlowExhaust_kgps_lookup(Soc_index)];
+            Theta1_interp = [Theta1_interp, StaticData{OP_index}.Theta1_lookup(Soc_index)];
+            Theta2_interp = [Theta2_interp, StaticData{OP_index}.Theta2_lookup(Soc_index)];
+            Theta1_NH3_controlled__interp = [Theta1_NH3_controlled__interp, StaticData{OP_index}.Theta1_NH3_controlled_lookup(Soc_index)];
+            Theta2_NH3_controlled__interp = [Theta2_NH3_controlled__interp, StaticData{OP_index}.Theta2_NH3_controlled_lookup(Soc_index)];
+            
+            p_ExPipeIn_interp = [p_ExPipeIn_interp, StaticData{OP_index}.p_ExPipeIn_Pa_lookup(Soc_index)];
+            BSCost_real_interp = [BSCost_real_interp, StaticData{OP_index}.BSCost_real_lookup(Soc_index)];
+            MFlowAdb_in_kgph_req_interp = [MFlowAdb_in_kgph_req_interp, StaticData{OP_index}.MFlowAdb_in_kgph_req_lookup(Soc_index)];
+            BSCost_real_NH3_controlled_interp = [BSCost_real_NH3_controlled_interp,StaticData{OP_index}.BSCost_real_NH3_controlled_lookup(Soc_index)];
+            ppm_NH3_out_interp = [ppm_NH3_out_interp,StaticData{OP_index}.ppm_NH3_out_lookup(Soc_index)];
+
+        end
+        vector_inv = [T_interp;dQ_interp;T_ExPipeIn_interp;NFlowNox_EngOut_molps_interp;...
+            MFlowExhaust_kgps_interp;Theta1_interp;Theta2_interp;p_ExPipeIn_interp;...
+            BSCost_real_interp;ppm_NH3_out_interp;BSCost_real_NH3_controlled_interp;...
+            Theta1_NH3_controlled__interp;Theta2_NH3_controlled__interp;MFlowAdb_in_kgph_req_interp];
+        vector_inv = sortrows(vector_inv')';
+        T_interp = vector_inv(1,:);
+        dQ_interp = vector_inv(2,:);
+        T_ExPipeIn_interp = vector_inv(3,:);
+        NFlowNox_EngOut_molps_interp = vector_inv(4,:);
+        MFlowExhaust_kgps_interp = vector_inv(5,:);
+        Theta1_interp = vector_inv(6,:);
+        Theta2_interp = vector_inv(7,:);        
+        p_ExPipeIn_interp = vector_inv(8,:);
+        BSCost_real_interp = vector_inv(9,:);
+        ppm_NH3_out_interp = vector_inv(10,:);
+        BSCost_real_NH3_controlled_interp = vector_inv(11,:);
+        Theta1_NH3_controlled__interp = vector_inv(12,:);
+        Theta2_NH3_controlled__interp = vector_inv(13,:);
+        MFlowAdb_in_kgph_req_interp = vector_inv(14,:);
+        for index3 = 1:size_mesh(3) % Torque vector
+            Torque_loop = Torque_mesh(1,1,index3);
+            dQ_lookup(index2,index1,index3) = interp1(T_interp,dQ_interp,Torque_loop,'linear','extrap');
+            dQ_lookup_plot(index2,index1,index3) = interp1(T_interp,dQ_interp,Torque_loop,'linear');
+            T_ExPipeIn_lookup(index2,index1,index3) = interp1(T_interp,T_ExPipeIn_interp,Torque_loop,'linear','extrap');
+            p_ExPipeIn_lookup(index2,index1,index3) = interp1(T_interp,p_ExPipeIn_interp,Torque_loop,'linear','extrap');
+            NFlowNox_EngOut_molps_lookup(index2,index1,index3) = interp1(T_interp,NFlowNox_EngOut_molps_interp,Torque_loop,'linear','extrap');
+            NFlowNox_EngOut_molps_lookup_plot(index2,index1,index3) = interp1(T_interp,NFlowNox_EngOut_molps_interp,Torque_loop,'linear');
+            MFlowExhaust_kgps_lookup(index2,index1,index3) = interp1(T_interp,MFlowExhaust_kgps_interp,Torque_loop,'linear','extrap');
+            Theta1_lookup(index2,index1,index3) = interp1(T_interp,Theta1_interp,Torque_loop,'linear','extrap');
+            Theta2_lookup(index2,index1,index3) = interp1(T_interp,Theta2_interp,Torque_loop,'linear','extrap');
+            Theta1_NH3_controlled_lookup(index2,index1,index3) = interp1(T_interp,Theta1_NH3_controlled__interp,Torque_loop,'linear','extrap');
+            Theta2_NH3_controlled_lookup(index2,index1,index3) = interp1(T_interp,Theta2_NH3_controlled__interp,Torque_loop,'linear','extrap');
+            BSCost_real_lookup(index2,index1,index3) = interp1(T_interp,BSCost_real_interp,Torque_loop,'linear','extrap');
+            MFlowAdb_in_kgph_req_lookup(index2,index1,index3) = interp1(T_interp,MFlowAdb_in_kgph_req_interp,Torque_loop,'linear','extrap');
+            BSCost_real_NH3_controlled_lookup(index2,index1,index3) = interp1(T_interp,BSCost_real_NH3_controlled_interp,Torque_loop,'linear','extrap');
+            ppm_NH3_out_lookup(index2,index1,index3) = interp1(T_interp,ppm_NH3_out_interp,Torque_loop,'linear','extrap');
+
+        end
+    end
+end
+
+%% 2d optimal SOC lookup
+[N_mesh_2d,Torque_mesh_2d] = meshgrid(N_vector,Torque_vector);
+Soc_optimal_lookup = [];
+Soc_NH3_controlled_lookup = [];
+BSCost_real_optimal_lookup = [];
+BSCost_real_optimal_NH3_controlled_lookup = [];
+for jj = 1:size(N_mesh_2d,2) % length of N_vector
+    for ii = 1:size(N_mesh_2d,1) % length of Torque_vector
+        Torque_this_loop = Torque_vector(ii);
+        N_vector_this_loop = N_vector(jj);
+        BSCost_real_lookup_squeeze = squeeze(BSCost_real_lookup(:,jj,ii));
+        BSCost_real_NH3_controlled_lookup_squeeze = squeeze(BSCost_real_NH3_controlled_lookup(:,jj,ii));
+
+        ppm_NH3_out_lookup_squeeze = squeeze(ppm_NH3_out_lookup(:,jj,ii));
+        BSCost_real_lookup_squeeze(ppm_NH3_out_lookup_squeeze > par.AmmoniaSlipLimit.Relaxed) = inf;
+        [BSCost_real_lookup_optimal,index_optimal] = min(BSCost_real_lookup_squeeze);
+        [BSCost_real_lookup_NH3_controlled,index_NH3_controlled] = min(BSCost_real_NH3_controlled_lookup_squeeze);
+        Soc_optimal = Soc_vector(index_optimal);
+        Soc_NH3_controlled = Soc_vector(index_NH3_controlled);
+
+        if isinf(BSCost_real_lookup_optimal)
+            Soc_optimal = nan;
+        end
+        
+        if isnan(Soc_optimal)
+            Soc_NH3_controlled = min(Soc_vector);
+        end
+            
+        if Torque_this_loop >= min(StaticData{4}.Torque_lookup) && ...
+                Torque_this_loop <= max(StaticData{4}.Torque_lookup) && N_vector_this_loop == 700
+            Soc_optimal = interp1(StaticData{4}.Torque_lookup, Soc_vector, Torque_this_loop);
+            Soc_NH3_controlled = Soc_optimal;
+            BSCost_real_lookup_optimal = interp1(Soc_vector, StaticData{4}.BSCost_real_lookup, Soc_optimal);
+            BSCost_real_lookup_NH3_controlled = BSCost_real_lookup_optimal;
+        end    
+        if Torque_this_loop >= min(StaticData{16}.Torque_lookup) && ...
+                Torque_this_loop <= max(StaticData{16}.Torque_lookup) && N_vector_this_loop == 1800
+            Soc_optimal = interp1(StaticData{16}.Torque_lookup, Soc_vector, Torque_this_loop);
+            Soc_NH3_controlled = Soc_optimal;
+            BSCost_real_lookup_optimal = interp1(Soc_vector, StaticData{16}.BSCost_real_lookup, Soc_optimal);
+            BSCost_real_lookup_NH3_controlled = BSCost_real_lookup_optimal;
+        end 
+        
+        
+        
+%         if N_vector_this_loop == 700 || (N_vector_this_loop > 1500 && Torque_this_loop < 400)
+%             Soc_NH3_controlled = nan;
+%             BSCost_real_lookup_NH3_controlled = nan;
+%         end
+        Soc_optimal_lookup(ii,jj) = Soc_optimal;
+        Soc_NH3_controlled_lookup(ii,jj) = Soc_NH3_controlled;
+        BSCost_real_optimal_lookup(ii,jj) = BSCost_real_lookup_optimal;
+        BSCost_real_optimal_NH3_controlled_lookup(ii,jj) = BSCost_real_lookup_NH3_controlled;
+    end
+end
+
+% similar for 2d default SOC lookup table
+
+
+
+%% plot
+% 3d-plot
+N_slice = [700,1400, 2100];
+% N_slice = [1000];
+% Soc_slice = [-10,-6,0,6,10];
+Soc_slice = [];
+% Torque_slice = [300,600,780];
+Torque_slice = [];
+figure(1);
+slice(N_mesh,Soc_mesh,Torque_mesh,dQ_lookup_plot,N_slice,Soc_slice,Torque_slice);
+% slice(N_mesh,Soc_mesh,Torque_mesh,dQ_lookup,N_slice,Soc_slice,Torque_slice);
+xlabel('engine speed [rpm]'),ylabel('SOI [^{\circ}bTDC]'),zlabel('engine torque [Nm]');
+title('3D look-up table for fuel injection [mg/str]');colorbar;
+
+figure(2);
+slice(N_mesh,Soc_mesh,Torque_mesh,dQ_lookup,N_slice,Soc_slice,Torque_slice);
+% slice(N_mesh,Soc_mesh,Torque_mesh,dQ_lookup,N_slice,Soc_slice,Torque_slice);
+xlabel('engine speed'),ylabel('SOC'),zlabel('torque required');
+title('engine map for fuel injected for interpolation');colorbar;
+
+% figure(4);
+% slice(N_mesh,Soc_mesh,Torque_mesh,BSCost_real_lookup,N_slice,Soc_slice,Torque_slice);
+% xlabel('engine speed'),ylabel('SOC'),zlabel('torque required');
+% title('map for cost');colorbar;
+
+% N fixed plot
+N_fix = 1200;
+SOC_N_fix = -10:1:10;
+Torque_N_fix = 0:10:800;
+length_SOC_N_fix = length(SOC_N_fix);
+length_Torque_N_fix = length(Torque_N_fix);
+reshape_matrix = [length_SOC_N_fix, length_Torque_N_fix];
+[N_fix_mesh,SOC_N_fix_mesh,Torque_N_fix_mesh] = meshgrid(N_fix,SOC_N_fix,Torque_N_fix);
+dQ_lookup_N_fixed = interp3(N_mesh,Soc_mesh,Torque_mesh,dQ_lookup,N_fix_mesh,SOC_N_fix_mesh,Torque_N_fix_mesh);
+NFlowNox_EngOut_molps_lookup_N_fixed = interp3(N_mesh,Soc_mesh,Torque_mesh,...
+    NFlowNox_EngOut_molps_lookup,N_fix_mesh,SOC_N_fix_mesh,Torque_N_fix_mesh);
+SOC_N_fix_mesh_reshaped = reshape(SOC_N_fix_mesh,reshape_matrix);
+Torque_N_fix_mesh_reshaped = reshape(Torque_N_fix_mesh, reshape_matrix);
+dQ_lookup_N_fixed_reshaped = reshape(dQ_lookup_N_fixed, reshape_matrix);
+NFlowNox_EngOut_molps_lookup_N_fixed_reshaped = reshape(NFlowNox_EngOut_molps_lookup_N_fixed, ...
+    reshape_matrix);
+
+figure(3);% for look-up display
+surf(SOC_N_fix_mesh_reshaped,Torque_N_fix_mesh_reshaped,dQ_lookup_N_fixed_reshaped);
+xlabel('start of injection [^{\circ}bTDC]'), ylabel('torque required [Nm]');
+zlabel('fuel injection [mg/str]'); zlim([0 160]);
+title(['Fuel injection Look-up Map at ' num2str(N_fix) ' rpm']); 
+
+% similar plots for other values, such as SOC look up table for NOx limitation based control and NH3 limitation based control, default engine control and brake specific cost 
