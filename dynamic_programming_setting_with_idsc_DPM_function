@@ -1,0 +1,138 @@
+function [X,C,I,out] = System_Dynamic_DP(inp,par)
+% System_Dynamic_DP Computes the resulting output of "diesel-engine + SCR"
+% system integratedly controlled by engine input SOC and SCR input adb mass
+% flow.
+% This 
+%   [X C I out] = System_Dynamic_DP(inp,par)
+%
+%   inp   = input structure
+%   par   = user defined parameters
+%
+%   X     = resulting ammonia coverage
+%   C     = cost matrix
+%   I     = infeasible matrix
+%   out   = user defined output signals
+
+theta1_old = inp.X{1}; % state 1: ammonia coverage in cell 1
+theta2_old = inp.X{2}; % state 2: ammonia coverage in cell 2
+% u1 = inp.U{1}; 
+u1_default_optimal = interp2(par.Steady_State_Optimal_LookUp.N_mesh_2d,...
+        par.Steady_State_Optimal_LookUp.Torque_mesh_2d, ...
+        par.Steady_State_Optimal_LookUp.Soc_default_lookup, ...
+        inp.W{1}, inp.W{2});
+u1 = min(inp.U{1},u1_default_optimal); % SOC [degree btdc]
+u2 = inp.U{2}; % Adb mass flow, [kg/s]
+size_u1 = size(u1);
+% size_u2 = size(u2);
+n_eng_actual = inp.W{1}; % engine rotation speed [rpm]
+torque_actual = inp.W{2}; % engine torque [Nm]
+T_SCR_1 = inp.W{3}; % temperature of SCR cell 1
+T_SCR_2 = inp.W{4}; % temperature of SCR cell 2
+T_SCR_average = (T_SCR_1 + T_SCR_2) / 2;
+T_SCR_average_celsius = T_SCR_average - 273.15;
+u2(T_SCR_average_celsius < 200) = 0; % when SCR temperature belows 250 celsius degree, no AdB flow. 
+
+dt = inp.Ts; % [s]
+% NH3 inlet [mol/s]
+NFlow_NH3_in = u2 .* par.adb.X_NH3 .* 1e3 ./ par.const.M_NH3.value;
+% engine out NOx [mol/s]
+NFlow_NOx_in = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+    par.EngLookUp.NFlowNox_EngOut_molps_lookup, n_eng_actual, reshape(u1,[],1), torque_actual);
+NFlow_NOx_in = reshape(NFlow_NOx_in,size_u1);
+% engine out exhaust gas [kg/s]
+MFlow_e = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+    par.EngLookUp.MFlowExhaust_kgps_lookup, n_eng_actual, reshape(u1,[],1), torque_actual);
+MFlow_e = reshape(MFlow_e,size_u1);
+% engine out temperature [K]
+T_ExPipeIn = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+    par.EngLookUp.T_ExPipeIn_lookup, n_eng_actual, reshape(u1,[],1), torque_actual);
+T_ExPipeIn = reshape(T_ExPipeIn,size_u1);
+% SCR time invariant parameters
+a0 = SCR_parameter_a0(par.gas.Reg, par.const.p_amb.value);
+a1 = SCR_parameter_a1(par.scr.nCell.value, par.scr.epsC, par.scr.V);
+% SCR time varying parameters of cell 1
+a3_1 = SCR_parameter_a3(T_SCR_1, par);
+a4_1 = SCR_parameter_a4(T_SCR_1, par);
+a5_1  = SCR_parameter_a5(T_SCR_1, par);
+a6_1  = SCR_parameter_a6(T_SCR_1, par);
+% SCR time varying parameters of cell 2
+a3_2 = SCR_parameter_a3(T_SCR_2, par);
+a4_2 = SCR_parameter_a4(T_SCR_2, par);
+a5_2  = SCR_parameter_a5(T_SCR_2, par);
+a6_2  = SCR_parameter_a6(T_SCR_2, par);
+
+% -------------------------------------------------------------------------
+% cell 1
+c_NOx_1 = a1 .* NFlow_NOx_in ./ (a0 .* a1 .* MFlow_e .* T_SCR_1 + a5_1 .* theta1_old);
+c_NH3_1 = (a1 .* NFlow_NH3_in + a4_1 .* theta1_old) ./ (a0 .* a1 .* MFlow_e .* T_SCR_1 + a3_1 .* (1 - theta1_old));
+NFlow_NOx_1_out = a0 .* MFlow_e .* T_SCR_1 .* c_NOx_1;
+NFlow_NH3_1_out = a0 .* MFlow_e .* T_SCR_1 .* c_NH3_1;
+theta1_new = theta1_old + 1/par.scr.cS .* dt .* (a3_1 .* (1 - theta1_old) .* c_NH3_1 - a4_1 .* theta1_old...
+    - a5_1 .* c_NOx_1 .* theta1_old - a6_1 .* theta1_old);
+% cell 2
+c_NOx_2 = a1 .* NFlow_NOx_1_out ./ (a0 .* a1 .* MFlow_e .* T_SCR_2 + a5_2 .* theta2_old);
+c_NH3_2 = (a1 .* NFlow_NH3_1_out + a4_2 .* theta2_old) ./ (a0 .* a1 .* MFlow_e .* T_SCR_2 + a3_2 .* (1 - theta2_old));
+NFlow_NOx_out = a0 .* MFlow_e .* T_SCR_2 .* c_NOx_2;
+NFlow_NH3_out = a0 .* MFlow_e .* T_SCR_2 .* c_NH3_2;
+theta2_new = theta2_old + 1 ./ par.scr.cS .* dt .* (a3_2 .* (1 - theta2_old) .* c_NH3_2 - a4_2 .* theta2_old...
+    - a5_2 .* c_NOx_2 .* theta2_old - a6_2 .* theta2_old);
+%--------------------------------------------------------------------------
+
+% state update-------------------------------------------------------------
+X{1} = theta1_new;
+X{2} = theta2_new;
+
+% cost calculation---------------------------------------------------------
+dQ_step = interp3(par.EngLookUp.N_mesh, par.EngLookUp.Soc_mesh, par.EngLookUp.Torque_mesh, ...
+    par.EngLookUp.dQ_lookup, n_eng_actual, reshape(u1,[],1), torque_actual);% fuel injected per stroke
+dQ_step = reshape(dQ_step,size_u1);
+[MFlowFuel_kgps_step,~] = func_dQ2FuelFlow(dQ_step,n_eng_actual,4); % fuel mass flow [kg/s]
+cost_fuel_CHF_step = MFlowFuel_kgps_step .* dt ./ par.fuel.DensFuel.DensFuel .* par.fuel.CostFuel.CostFuel;
+cost_Adb_CHF_step = u2 .* dt .* par.adb.CostAdbperKg.value;
+% k1 = 13;
+% k2 = 0.001;
+cost_NOx_g_step = NFlow_NOx_out .* par.const.M_NOx .* 1e3 .* dt;
+cost_NH3_ppm_step = NFlow_NH3_out ./ (MFlow_e ./ par.const.M_air) .* 1e6;
+% cost_NH3_ppm_step_penalty = zeros(size(cost_NH3_ppm_step));
+% cost_NH3_ppm_step_penalty(cost_NH3_ppm_step > 25) = cost_NH3_ppm_step(cost_NH3_ppm_step > 25);
+% C{1} = cost_fuel_CHF_step + cost_Adb_CHF_step +  k1 * cost_NOx_g_step + k2 * cost_NH3_ppm_step; % [CHF]
+% C{1} = cost_fuel_CHF_step + cost_Adb_CHF_step +  k1* 100 * cost_NOx_g_step; % [CHF]
+% C{1} =   alpha * cost_NOx_g_step + (1-alpha) * k2 * cost_NH3_ppm_step;
+% C{1} =   alpha * cost_fuel_CHF_step + (1-alpha) * cost_NOx_g_step;
+% C{1} = cost_fuel_CHF_step + cost_Adb_CHF_step +  k1 * cost_NOx_g_step;
+% C{1} = (1-alpha) * cost_Adb_CHF_step +  alpha * cost_NOx_g_step;
+% keyboard;
+C{1} = (1 - par.weight_alpha - par.weight_beta) * (cost_fuel_CHF_step + cost_Adb_CHF_step) ...
+    +  par.weight_alpha * cost_NOx_g_step  + par.weight_beta * cost_NH3_ppm_step/1000;
+% if grid_size(1) > 1
+%     alpha_terminal = 0;
+%     beta_terminal = Inf;
+%     C{1}(end,:,:,:) = (1-alpha_terminal - beta_terminal) * (cost_fuel_CHF_step(end,:,:,:) + cost_Adb_CHF_step(end,:,:,:)) ...
+%     +  alpha_terminal * cost_NOx_g_step(end,:,:,:)  + beta_terminal * cost_NH3_ppm_step(end,:,:,:)/1000;
+% end
+
+% infeasability------------------------------------------------------------
+cond1 = theta1_new > 1.005 | theta1_new < -0.005 | theta2_new > 1.005 | theta2_new < -0.005;
+cond2 = repmat(n_eng_actual,size_u1) < 800 & dQ_step > 80;
+cond3 = repmat(n_eng_actual,size_u1) > 1900 & dQ_step > 110;
+cond4 = isnan(theta1_new) | isnan(theta2_new);
+I = cond1 | cond2 | cond3 | cond4;
+% ouput--------------------------------------------------------------------
+
+ppm_NH3_out = NFlow_NH3_out ./ (MFlow_e ./ par.const.M_air) .* 1e6;
+out.ppm_NH3_out = ppm_NH3_out; % outlet NH3 [ppm]
+MFlow_NOx_out = NFlow_NOx_out .* par.const.M_NOx;
+out.MFlow_NOx_out = MFlow_NOx_out; % outlet NOx [kg/s]
+MFlow_NOx_in = NFlow_NOx_in .* par.const.M_NOx;
+out.MFlow_NOx_in = MFlow_NOx_in; % inlet NOx [kg/s]
+out.C       = C{1};
+out.u1      = u1;
+out.I       = I;
+out.u2      = u2;
+out.T_ExPipeIn  = T_ExPipeIn;
+out.cost_fuel_CHF_step = cost_fuel_CHF_step;
+out.cost_Adb_CHF_step =cost_Adb_CHF_step;
+out.cost_NOx_g_step = cost_NOx_g_step;
+out.cost_NH3_ppm_step = cost_NH3_ppm_step;
+%     out.dt_SCR = a7 * MFlow_e;
+end
