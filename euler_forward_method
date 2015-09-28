@@ -1,0 +1,36 @@
+function [ NFlow_NH3_out, NFlow_NOx_out, sys_state_new, CtrFeasibilty, StateFeasibility ] = System_Dynamic_Euler( ...
+    NFlow_NH3_in, NFlow_NOx_in, sys_state_old, MFlow_e, T_in, P_kW, dt, par )
+% function for integrating the system dynamics using Euler forward method
+theta1_old = sys_state_old(1);
+theta2_old = sys_state_old(2);
+
+% system parameters
+a0 = SCR_parameter_a0(par.gas.Reg, par.const.p_amb.value);
+a1 = SCR_parameter_a1(par.scr.nCell.value, par.scr.epsC, par.scr.V);
+a3 = SCR_parameter_a3(T_in, par);
+a4 = SCR_parameter_a4(T_in, par);
+a5  = SCR_parameter_a5(T_in, par);
+a6  = SCR_parameter_a6(T_in, par);
+% cell 1
+c_NOx_1 = a1 * NFlow_NOx_in / (a0 * a1 * MFlow_e * T_in + a5 * theta1_old);
+c_NH3_1 = (a1 * NFlow_NH3_in + a4 * theta1_old)/(a0*a1*MFlow_e*T_in + a3*(1-theta1_old));
+NFlow_NOx_1_out = a0 * MFlow_e * T_in * c_NOx_1;
+NFlow_NH3_1_out = a0 * MFlow_e * T_in * c_NH3_1;
+theta1_new = theta1_old + 1/par.scr.cS * dt * (a3 * (1 - theta1_old) * c_NH3_1 - a4 * theta1_old...
+    - a5 * c_NOx_1 * theta1_old - a6 * theta1_old);
+
+% similar calculation for cell 2
+
+% feasibilty
+ppm_NH3_out = NFlow_NH3_out/(MFlow_e/par.const.M_air)*1e6;
+ppm_NOx_out = NFlow_NOx_out/(MFlow_e/par.const.M_air)*1e6;
+BSNOx_Out = ppm_NOx_out * MFlow_e / par.const.M_air * 3.6 *par.const.M_NOx/P_kW;
+CtrFeasibilty = ppm_NH3_out<= 25 && BSNOx_Out <= par.EmitLimit.value;
+StateFeasibility = theta1_new <= 1 && theta2_new <= 1 && theta1_new >= 0 && theta2_new >= 0;
+
+% system output
+sys_state_new(1,1) = theta1_new;
+sys_state_new(2,1) = theta2_new;
+
+end
+
