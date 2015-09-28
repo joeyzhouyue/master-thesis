@@ -1,0 +1,80 @@
+clear all, close all, clc
+load('some data');
+%% DP algorithm
+for DP_stage = stage_number : -1 : 1
+    
+    time_actual = (DP_stage - 1) * dt;
+    n_eng_actual = interp1(t_Op_tot_vec, n_eng_vec,time_actual);
+    torque_actual = interp1(t_Op_tot_vec, T_Op_tot,time_actual);
+    P_kW = n_eng_actual * pi / 30 * torque_actual * 1e-3;
+    state_info_stage = state_info(:,:,DP_stage+1); % state at next step
+    nonzero_element = find(~any(state_info_stage,1));
+    state_info_stage(:,nonzero_element) = [];
+    
+    current_state_this_info_vec = [];
+    for i_state = 1: size(state_info_stage,2)
+        i_state_info = state_info_stage(:,find(any(state_info_stage(2,:) == state_info_stage(2,i_state),1)));
+        if isempty(i_state_info)  continue; end
+        current_state_this_info = round(state_info_stage(2,i_state));
+        
+        if ~isempty(find(current_state_this_info_vec == current_state_this_info))
+            continue
+        else
+            current_state_this_info_vec = [current_state_this_info_vec;current_state_this_info];
+        end
+        cost_to_go_this_vec = [];
+        for i_control = 1 : size(i_state_info,2)
+            if DP_info(4,round(i_state_info(1,i_control)),DP_stage+1) == inf
+                continue;
+            end
+             % J(k+1) + g(k)
+            cost_to_go_this = DP_info(4,round(i_state_info(1,i_control)),DP_stage+1) + i_state_info(5,i_control);
+            cost_to_go_this_vec(1,i_control) = cost_to_go_this;
+        end
+        i_state_info_with_J = [i_state_info; cost_to_go_this_vec];
+        i_state_info_with_J = sortrows(i_state_info_with_J',6)'; % the 6th. row is the cost to go value
+        
+        DP_info(1:5,current_state_this_info, DP_stage) = [i_state_info_with_J(3:6,1);i_state_info_with_J(1,1)];
+    end
+end
+
+%% result
+DP_step_1 = DP_info(:,:,1);
+zero_element = find(~any(DP_step_1,1));
+DP_step_1(:,zero_element) = [];
+state_initial = find(DP_info(1,:,1)==DP_step_1(1));
+optimal_info = DP_step_1;
+% find out optimal solution
+for i_control_op = 2: stage_number
+    state_op_next = optimal_info(5,i_control_op-1);
+    optimal_info = [optimal_info, DP_info(:,state_op_next,i_control_op)];
+end
+% find out optimal state trajectory
+state_optimal = State_1_to_2(state_initial,state_discrete);
+control_optimal = [];
+cost_optimal = [];
+for i_control_op2 = 1: stage_number
+    state_optimal = [state_optimal,repmat(State_1_to_2(optimal_info(5,i_control_op2),state_discrete),1,dt)];
+    control_optimal = [ control_optimal, repmat(optimal_info(1:2,i_control_op2),1,dt)];
+    cost_optimal = [ cost_optimal, repmat(optimal_info(3:4,i_control_op2),1,dt)];
+end
+figure;
+subplot(411), plot(t_Op_tot_vec, T_Op_tot);ylabel('torque');
+subplot(412), plot(t_Op_tot_vec(1:size(control_optimal,2)), control_optimal); legend('u1','u2'); ylabel('optimal control inputs')
+subplot(413), plot(t_Op_tot_vec,state_optimal);legend('cell 1','cell 2');ylabel('ammonia coverage in SCR');
+subplot(414), plot(t_Op_tot_vec(1:size(cost_optimal,2)),cost_optimal); legend('stage cost','cost to go'); ylabel('optimal costs');
+xlabel('time [s]');
+
+
+
+%
+% check = DP_info(:,411,7);
+% nonzero_element = find(~any(check,1));
+% check(:,nonzero_element) = []
+% % %
+% % %
+% % %
+% check2 = state_info(:,:,6);
+% nonzero_element = find(~any(check2,1));
+% check2(:,nonzero_element) = []
+
