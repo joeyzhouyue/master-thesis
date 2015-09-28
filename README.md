@@ -6,5 +6,3 @@ In this Master Thesis, the integrated control is introduced, which takes the eng
 After the system modelling, the integrated control in two different engine operation scenarios was analyzed: the steady-state and the transient operation (NRTC cycle). In steady state, the integrated control is able to reduce the brake specific cost in some engine operation range if the operating point considered is feasible; if infeasible, the system under integrated control emits less tailpipe emission than with the tranditional engine calibration at least. In transient operation, the performance of tradi...(line truncated)...
 
 My main contribution regarding the programming work in MATLAB was the map-based engine model, mathematical modelling and parameter identification of exhaust pipe system and SCR system, backward simulation at static operation and the implementation of Dynamic Programming at dynamic operation.
-
-Master-Thesis
