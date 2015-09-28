@@ -1,0 +1,26 @@
+clear all, close all, clc
+load('some data');
+
+NFlow_NH3_in = StaticData{2}.MFlowNH3_in_gph_req(1) / 3600 / par.const.M_NH3.value;
+% similar for inlet NOx flow
+
+%% dt =1; integrate with time step of 1s
+dt = 1;
+P_kW = StaticData{2}.P_kW(1);
+T_in = StaticData{2}.T_inlet_SCR(1);
+MFlow_e = StaticData{2}.MFlowExhaust_kgps(1);
+sys_state_old = [0;0];
+sys_state_record = [];
+t1 = 1:1000;
+for i = 1 : 1000
+    [ NFlow_NH3_out, NFlow_NOx_out, sys_state_new, CtrFeasibilty ] = System_Dynamic_Euler( ...
+        NFlow_NH3_in, NFlow_NOx_in, sys_state_old, MFlow_e, T_in, P_kW, dt, par );
+    sys_state_old = sys_state_new;
+    sys_state_record = [sys_state_record, sys_state_new];
+end
+
+figure; plot(t1,sys_state_record'); hold on;
+
+%% also similuation for integrating with time step with 10s
+%% then compare the results of them
+
